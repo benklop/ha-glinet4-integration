@@ -50,6 +50,7 @@ class GliSwitchBase(SwitchEntity):
         self._attr_is_on: bool | None
 
     _attr_has_entity_name = True
+    _attr_should_poll = False
 
     @property
     def is_on(self) -> bool | None:
@@ -209,9 +210,8 @@ class TailscaleSwitch(GliSwitchBase):
 
     @callback
     async def async_update(self) -> None:
-        """Update the switch state. Only one tailscale connection can be configured so this is not expensive."""
-        _LOGGER.debug("Updating Tailscale switch state")
-        await self._router.update_tailscale_state()
+        """Update the switch state from cached router data."""
+        _LOGGER.debug("Updating Tailscale switch state from stored info")
         self._attr_is_on = self._router.tailscale_connection
 
 

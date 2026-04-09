@@ -8,6 +8,8 @@ from enum import StrEnum
 import logging
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import aiohttp
+import async_timeout
 from gli4py import GLinet
 from gli4py.enums import TailscaleConnection
 from gli4py.error_handling import AuthenticationError, NonZeroResponse, TokenError
@@ -46,6 +48,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=30)
+API_TIMEOUT_SECONDS = 10
 T = TypeVar("T")
 
 
@@ -200,9 +203,10 @@ class GLinetRouter:
     async def renew_token(self) -> None:
         """Attempt to get a new token."""
         try:
-            await self._api.login(
-                self._entry.data[CONF_USERNAME], self._entry.data[CONF_PASSWORD]
-            )
+            async with async_timeout.timeout(API_TIMEOUT_SECONDS):
+                await self._api.login(
+                    self._entry.data[CONF_USERNAME], self._entry.data[CONF_PASSWORD]
+                )
             _LOGGER.info(
                 "GL-iNet router %s token was renewed",
                 self._host,
@@ -213,11 +217,11 @@ class GLinetRouter:
                 self._host,
             )
             raise ConfigEntryAuthFailed from exc
-        except Exception as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             _LOGGER.warning(
                 "Could not connect to GL-iNet router to renew token: %s", exc
             )
-            raise  # Let generic network/timeout exceptions bubble up normally
+            raise
 
     async def update_all(self, _: datetime | None = None) -> None:
         """Update all Gl-inet platforms."""
@@ -252,8 +256,9 @@ class GLinetRouter:
             _LOGGER.debug(
                 "Making api call %s from _update_platform()", api_callable.__name__
             )
-            response = await api_callable()
-        except TimeoutError:
+            async with async_timeout.timeout(API_TIMEOUT_SECONDS):
+                response = await api_callable()
+        except (TimeoutError, aiohttp.ClientError):
             if not self._connect_error:
                 self._connect_error = True
                 _LOGGER.exception(
@@ -387,7 +392,8 @@ class GLinetRouter:
     async def update_tailscale_state(self) -> None:
         """Make a call to the API to get the tailscale state."""
 
-        if not await self._api.tailscale_configured():
+        configured = await self._update_platform(self._api.tailscale_configured)
+        if not configured:
             self._tailscale_config = {}
             return
         # TODO this is a placeholder that needs to be replaced with a pulic method that combines useful info in _tailscale_status and _tailscale_get_config
@@ -397,13 +403,13 @@ class GLinetRouter:
             )
             or {}
         )
-        response: TailscaleConnection = await self._update_platform(
+        response: TailscaleConnection | None = await self._update_platform(
             self._api.tailscale_connection_state
         )
 
         if response == TailscaleConnection.CONNECTED:
             self._tailscale_connection = True
-        else:
+        elif response is not None:
             self._tailscale_connection = False
 
     async def update_wireguard_client_state(self) -> None:
