@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .router import GLinetRouter
+from .services import async_ensure_services, async_release_services
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -27,13 +28,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.runtime_data = router
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_ensure_services(hass)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
 
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        await async_release_services(hass)
+    return unload_ok
 
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
