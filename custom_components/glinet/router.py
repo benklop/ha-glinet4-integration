@@ -110,6 +110,7 @@ class GLinetRouter:
         self._wireguard_connections: list[WireGuardClient] | None = None
         self._tailscale_config: dict = {}
         self._tailscale_connection: bool | None = None
+        self._tailscale_show_switch: bool = False
 
         # Flow control
         self._late_init_complete: bool = False
@@ -395,6 +396,7 @@ class GLinetRouter:
         configured = await self._update_platform(self._api.tailscale_configured)
         if not configured:
             self._tailscale_config = {}
+            self._tailscale_show_switch = False
             return
         # TODO this is a placeholder that needs to be replaced with a pulic method that combines useful info in _tailscale_status and _tailscale_get_config
         self._tailscale_config = (
@@ -403,6 +405,18 @@ class GLinetRouter:
             )
             or {}
         )
+        status_raw = await self._update_platform(
+            self._api._tailscale_status  # pylint: disable=protected-access  # noqa: SLF001
+        )
+        ts_active = False
+        if isinstance(status_raw, dict) and status_raw:
+            ts_active = True
+        elif isinstance(status_raw, list) and status_raw:
+            ts_active = True
+        self._tailscale_show_switch = ts_active or (
+            self._tailscale_config.get("enabled") is True
+        )
+
         response: TailscaleConnection | None = await self._update_platform(
             self._api.tailscale_connection_state
         )
@@ -424,13 +438,21 @@ class GLinetRouter:
         # TODO we need to do some validation before we start accessing dictionary keys, I've had errors before
         # May be best to redact it in gli4py.
         for config in response:
-            self._wireguard_clients[config["peer_id"]] = WireGuardClient(
-                name=config["name"],
-                connected=False,
-                group_id=config["group_id"],
-                peer_id=config["peer_id"],
-                tunnel_id=config.get("tunnel_id", None),
-            )
+            peer_id = config["peer_id"]
+            if peer_id in self._wireguard_clients:
+                client = self._wireguard_clients[peer_id]
+                client.name = config["name"]
+                client.group_id = config["group_id"]
+                client.tunnel_id = config.get("tunnel_id")
+                client.connected = False
+            else:
+                self._wireguard_clients[peer_id] = WireGuardClient(
+                    name=config["name"],
+                    connected=False,
+                    group_id=config["group_id"],
+                    peer_id=peer_id,
+                    tunnel_id=config.get("tunnel_id", None),
+                )
 
         if len(self._wireguard_clients) == 0:
             _LOGGER.debug("No wireguard clients, there is nothing to update")
@@ -440,22 +462,24 @@ class GLinetRouter:
         response = await self._update_platform(self._api.wireguard_client_state)
         if not response:
             return
-        # 0 is disconnted, 1 is connected, 2 is connecting
+        # Legacy wg-client: 0 disconnected, 1 connected, 2 connecting.
+        # vpn-client (4.8+): enabled + optional status; see gli4py tests.
         self._wireguard_connections = []
         for config in response:
-            # OpenVPN configs are sometimes returned leading to errors.
-            if config.get("type") != "wireguard":
+            vpn_type = config.get("type")
+            if vpn_type is not None and vpn_type != "wireguard":
                 continue
-            # if config["enabled"] is false then status does not exist
-            connected: bool = config.get("status", 0) != 0
+            connected = _wireguard_status_connected(config)
 
-            if self._wireguard_clients[config["peer_id"]]:
-                client: WireGuardClient = self._wireguard_clients[config["peer_id"]]
-                client.tunnel_id = config.get("tunnel_id", None)
-                client.connected = connected
-                if connected:
-                    # If more modern firmware supports more than 1 client being connected, we need to change this
-                    self._wireguard_connections.append(client)
+            peer_id = config["peer_id"]
+            client = self._wireguard_clients.get(peer_id)
+            if client is None:
+                continue
+            client.tunnel_id = config.get("tunnel_id", client.tunnel_id)
+            client.connected = connected
+            if connected:
+                # If more modern firmware supports more than 1 client being connected, we need to change this
+                self._wireguard_connections.append(client)
 
     def update_options(self, new_options: dict) -> bool:
         """Update router options.
@@ -559,9 +583,14 @@ class GLinetRouter:
         return self._tailscale_config != {}
 
     @property
+    def tailscale_switch_exposed(self) -> bool:
+        """Whether to expose the Tailscale switch (feature enabled or status present)."""
+        return self._tailscale_show_switch
+
+    @property
     def tailscale_connection(self) -> bool | None:
         """Property for tailscale connection."""
-        if not self.tailscale_configured:
+        if not self.tailscale_switch_exposed:
             return None
         return self._tailscale_connection
 
@@ -578,6 +607,19 @@ class GLinetRouter:
         return self._system_status
 
 
+def _wireguard_status_connected(config: dict) -> bool:
+    """Derive WireGuard client connectivity from vpn-client / wg-client status dict."""
+    enabled = config.get("enabled")
+    if enabled is False:
+        return False
+    status_val = config.get("status")
+    if enabled is True:
+        if status_val is None:
+            return True
+        return status_val != 0
+    return (status_val if status_val is not None else 0) != 0
+
+
 @dataclass
 class WireGuardClient:
     """Class for keeping track of WireGuard Client Configs."""
@@ -587,6 +629,20 @@ class WireGuardClient:
     group_id: int
     peer_id: int
     tunnel_id: int | None
+
+
+def wifi_iface_band_label(iface_key: str) -> str | None:
+    """Map GL.iNet wifi iface keys (e.g. wifi2g, guest5g) to a short band label for UI."""
+    n = iface_key.lower()
+    if "6g" in n:
+        return "6 GHz"
+    if "5g" in n:
+        return "5 GHz"
+    if "2g" in n:
+        return "2.4 GHz"
+    if "mlo" in n:
+        return "MLO"
+    return None
 
 
 @dataclass

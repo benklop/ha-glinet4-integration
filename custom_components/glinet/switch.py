@@ -9,6 +9,8 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import callback
 
+from .router import wifi_iface_band_label
+
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -32,7 +34,7 @@ async def async_setup_entry(
             WireGuardSwitch(router, client)
             for client in router.wireguard_clients.values()
         ]
-    if router.tailscale_configured:
+    if router.tailscale_switch_exposed:
         switches.append(TailscaleSwitch(router))
     for iface_name, iface in router.wifi_ifaces.items():
         switches.append(WifiApSwitch(router, iface_name, iface))
@@ -84,7 +86,11 @@ class WifiApSwitch(GliSwitchBase):
     @property
     def name(self) -> str:
         """Return the name of the switch."""
-        return self._iface.ssid if self._iface.ssid else self._iface.name
+        base = self._iface.ssid if self._iface.ssid else self._iface.name
+        band = wifi_iface_band_label(self._iface_name)
+        if band:
+            return f"{base} ({band})"
+        return base
 
     @property
     def unique_id(self) -> str:
@@ -100,6 +106,8 @@ class WifiApSwitch(GliSwitchBase):
         attrs["ssid"] = self._iface.ssid
         attrs["hidden"] = self._iface.hidden
         attrs["encryption"] = self._iface.encryption
+        if band := wifi_iface_band_label(self._iface_name):
+            attrs["band"] = band
         return attrs
 
     async def async_turn_on(self, **_: Any) -> None:
@@ -201,12 +209,12 @@ class TailscaleSwitch(GliSwitchBase):
     @property
     def entity_registry_enabled_default(self) -> bool:
         """Enabled by default."""
-        return self._router.tailscale_configured
+        return self._router.tailscale_switch_exposed
 
     @property
     def entity_registry_visible_default(self) -> bool:
         """Enabled by default."""
-        return self._router.tailscale_configured
+        return self._router.tailscale_switch_exposed
 
     @callback
     async def async_update(self) -> None:
